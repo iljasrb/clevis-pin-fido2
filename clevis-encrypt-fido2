@@ -56,6 +56,27 @@ if [ -t 0 ]; then
     exit 2
 fi
 
+# cfg_str() reads string option $1 from the global $cfg, echoing default $2
+# when the key is absent. A key that is present but not a JSON string is a
+# hard error -- silently falling back to the default would ignore what the
+# user asked for (worst case: a mistyped cred_id would silently enroll a
+# brand-new credential instead of using the given one).
+function cfg_str () {
+  local key="$1"
+  local def="$2"
+  local val
+
+  if ! jose fmt -j- -Og "${key}" -o- <<< "${cfg}" > /dev/null 2>&1; then
+    echo -n "${def}"
+    return 0
+  fi
+  if ! val="$(jose fmt -j- -Og "${key}" -Su- <<< "${cfg}")"; then
+    echo "${0##*/}: Error: '${key}' must be a string." >&2
+    exit 1
+  fi
+  echo -n "${val}"
+}
+
 function require_bool () {
   local name="$1"
   local value="$2"
@@ -179,15 +200,27 @@ if ! cfg="$(jose fmt -j- -Oo- <<< "${1:-}" 2>/dev/null)"; then
     exit 1
 fi
 
-type="$(jose fmt -j- -Og type -Su- <<< "$cfg")" || type='es256'
+type="$(cfg_str type 'es256')"
 uv="$(jose fmt -j- -Og uv -o- <<< "$cfg")" || uv='false'
 up="$(jose fmt -j- -Og up -o- <<< "$cfg")" || up='true'
 pin="$(jose fmt -j- -Og pin -o- <<< "$cfg")" || pin='false'
 resident="$(jose fmt -j- -Og resident -o- <<< "$cfg")" || resident='false'
-rp_id="$(jose fmt -j- -Og rp_id -Su- <<< "$cfg")" || rp_id='fido2.clevis'
-device="$(jose fmt -j- -Og device -Su- <<< "$cfg")" || device=''
-aaguid="$(jose fmt -j- -Og aaguid -Su- <<< "$cfg")" || aaguid=''
-timeout="$(jose fmt -j- -Og timeout -No- <<< "$cfg" || jose fmt -j- -Og timeout -Su- <<< "$cfg")" || timeout=''
+rp_id="$(cfg_str rp_id 'fido2.clevis')"
+device="$(cfg_str device '')"
+aaguid="$(cfg_str aaguid '')"
+cred_id="$(cfg_str cred_id '')"
+
+# timeout accepts a JSON number or a numeric string (backwards compat); any
+# other present type is an error rather than a silent fall-through to the
+# default.
+if jose fmt -j- -Og timeout -o- <<< "$cfg" > /dev/null 2>&1; then
+  timeout="$(jose fmt -j- -Og timeout -No- <<< "$cfg" || jose fmt -j- -Og timeout -Su- <<< "$cfg")" || {
+    echo "${0##*/}: Error: 'timeout' must be a number or a numeric string." >&2
+    exit 1
+  }
+else
+  timeout=''
+fi
 
 case "${type}" in
 es256|rs256|eddsa) ;;
@@ -225,7 +258,8 @@ show_msg=1
 show_msg_aaguid=1
 
 user_timeout="${TIMEOUT:-$timeout}"
-timeout1="${user_timeout:-$DEFAULT_TIMEOUT}"
+effective_timeout="${user_timeout:-$DEFAULT_TIMEOUT}"
+timeout1="${effective_timeout}"
 
 while [[ ! -c "${fido2_token}" ]]; do
   sleep 1
@@ -262,18 +296,20 @@ while [[ ! -c "${fido2_token}" ]]; do
   if [[ ${timeout1} -lt 1 ]]; then
     if [[ -z "${fido2_token}" ]]; then
       if [[ -n "${aaguid}" && -n "${fido2_tokens}" ]]; then
-        echo "${0##*/}: Error: No connected token matches the configured aaguid within ${timeout} seconds." >&2
+        echo "${0##*/}: Error: No connected token matches the configured aaguid within ${effective_timeout} seconds." >&2
       else
-        echo "${0##*/}: Error: No FIDO2 token found within ${timeout} seconds." >&2
+        echo "${0##*/}: Error: No FIDO2 token found within ${effective_timeout} seconds." >&2
       fi
     else
-      echo "${0##*/}: Error: specified FIDO2 token ${fido2_token} not found within ${timeout} seconds." >&2
+      echo "${0##*/}: Error: specified FIDO2 token ${fido2_token} not found within ${effective_timeout} seconds." >&2
     fi
     exit 1
   fi
 done
 
-cred_id="$(jose fmt -j- -Og cred_id -Su- <<< "$cfg")" || cred_id="$(create_credential "${fido2_token}" "${rp_id}" "${type}" "${resident}")"
+if [ -z "${cred_id}" ]; then
+  cred_id="$(create_credential "${fido2_token}" "${rp_id}" "${type}" "${resident}")"
+fi
 
 # generate a random salt for each encrypted payload
 hmac_salt="$(dd if=/dev/urandom bs=1 count=32 status=none | base64 -w0)"

@@ -114,6 +114,43 @@ setup () {
   [[ "$output" == *"'aaguid' must be a 32-character hex string"* ]]
 }
 
+@test "non-string cred_id is rejected, not silently replaced by a new credential" {
+  run bash -c "printf x | clevis-encrypt-fido2 '{\"cred_id\": 12345, \"timeout\":2}'"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"'cred_id' must be a string"* ]]
+  # and no credential creation was attempted
+  ! grep -q '^fido2-cred' "${STUB_LOG}"
+}
+
+@test "non-string type/rp_id are rejected, not silently defaulted" {
+  run bash -c "printf x | clevis-encrypt-fido2 '{\"type\": 5}'"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"'type' must be a string"* ]]
+  run bash -c "printf x | clevis-encrypt-fido2 '{\"rp_id\": []}'"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"'rp_id' must be a string"* ]]
+}
+
+@test "given cred_id is used as-is: no new credential is created" {
+  printf 'x' | clevis-encrypt-fido2 '{"cred_id":"AAAA","timeout":2}' > "${BATS_TEST_TMPDIR}/j.jwe"
+  ! grep -q '^fido2-cred' "${STUB_LOG}"
+  [ "$(jwe_header_field "${BATS_TEST_TMPDIR}/j.jwe" cred_id)" == "AAAA" ]
+}
+
+@test "decrypt of dot-less garbage input fails with a clear error, not silently" {
+  run bash -c "printf 'no-dot-garbage' | clevis-decrypt-fido2"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"JWE header corrupt"* ]]
+}
+
+@test "timeout-expiry message shows the effective timeout, including TIMEOUT override" {
+  export STUB_FIDO2_NO_TOKEN=1
+  export TIMEOUT=1
+  run bash -c "printf x | clevis-encrypt-fido2 '{}'"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"within 1 seconds"* ]]
+}
+
 @test "decrypt rejects a JWE with a corrupt timeout header instead of crashing" {
   printf 'x' | clevis-encrypt-fido2 '{"timeout":2}' > "${BATS_TEST_TMPDIR}/j.jwe"
   hdr64="$(cut -d. -f1 "${BATS_TEST_TMPDIR}/j.jwe")"

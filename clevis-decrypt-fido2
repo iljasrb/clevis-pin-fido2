@@ -45,7 +45,10 @@ find_token_by_aaguid () {
   return 1
 }
 
-read -r -d . hdr64
+# `read -d .` fails (EOF) when the input contains no dot at all, but still
+# populates hdr64 with what it consumed -- tolerate that so garbage input
+# reaches the header check below instead of dying silently under `set -e`.
+read -r -d . hdr64 || true
 if ! hdr="$(jose fmt --quote="$hdr64" --string --b64load --object --output=-)" ; then
     echo "${0##*/}: JWE header corrupt!" >&2
     exit 1
@@ -80,7 +83,8 @@ fido2_token="${FIDO2_TOKEN:-$device}"
 show_msg=1
 show_msg_aaguid=1
 user_timeout="${TIMEOUT:-$timeout}"
-timeout1="${user_timeout:-$DEFAULT_TIMEOUT}"
+effective_timeout="${user_timeout:-$DEFAULT_TIMEOUT}"
+timeout1="${effective_timeout}"
 while [[ ! -c "${fido2_token}" ]]; do
   sleep 1
   if [[ -z "${fido2_token}" ]]; then
@@ -113,12 +117,12 @@ while [[ ! -c "${fido2_token}" ]]; do
   if [[ ${timeout1} -lt 1 ]]; then
     if [[ -z "${fido2_token}" ]]; then
       if [[ -n "${aaguid}" && -n "${fido2_tokens}" ]]; then
-        echo "${0##*/}: Error: No connected token matches the configured aaguid within ${timeout} seconds." >&2
+        echo "${0##*/}: Error: No connected token matches the configured aaguid within ${effective_timeout} seconds." >&2
       else
-        echo "${0##*/}: Error: No FIDO2 token found within ${timeout} seconds." >&2
+        echo "${0##*/}: Error: No FIDO2 token found within ${effective_timeout} seconds." >&2
       fi
     else
-      echo "${0##*/}: Error: specified FIDO2 token ${fido2_token} not found within ${timeout} seconds." >&2
+      echo "${0##*/}: Error: specified FIDO2 token ${fido2_token} not found within ${effective_timeout} seconds." >&2
     fi
     exit 1
   fi

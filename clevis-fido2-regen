@@ -53,6 +53,13 @@ done
 
 [ -z "${DEV}" ] && { echo "${0##*/}: Error: Did not specify a device (-d)." >&2; usage 1; }
 
+for cmd in cryptsetup jose clevis; do
+  if ! command -v "${cmd}" > /dev/null; then
+    echo "${0##*/}: Error: this tool requires '${cmd}' on PATH." >&2
+    exit 1
+  fi
+done
+
 if [ -n "${SLT}" ] && [[ ! "${SLT}" =~ ^[0-9]+$ ]]; then
   echo "${0##*/}: Error: '-s' must be a non-negative integer slot number." >&2
   exit 1
@@ -158,16 +165,35 @@ if [ "${pin_name}" != "fido2" ]; then
   exit 1
 fi
 
-type="$(get_field "${hdr}" clevis/fido2/type 1)"
-rp_id="$(get_field "${hdr}" clevis/fido2/rp_id 1)"
-cred_id="$(get_field "${hdr}" clevis/fido2/cred_id 1)"
-uv="$(get_field "${hdr}" clevis/fido2/uv 1)"
-up="$(get_field "${hdr}" clevis/fido2/up 1)"
-pin="$(get_field "${hdr}" clevis/fido2/pin 1)"
+# req_field() is get_field for fields the fido2 pin always writes: a clear
+# error instead of a silent `set -e` death when the metadata is corrupt.
+req_field () {
+  get_field "${hdr}" "${1}" 1 || {
+    echo "${0##*/}: Error: slot ${SLT} metadata is missing '${1}' -- corrupt or incompatible binding; nothing was changed." >&2
+    exit 1
+  }
+}
+
+type="$(req_field clevis/fido2/type)"
+rp_id="$(req_field clevis/fido2/rp_id)"
+cred_id="$(req_field clevis/fido2/cred_id)"
+uv="$(req_field clevis/fido2/uv)"
+up="$(req_field clevis/fido2/up)"
+pin="$(req_field clevis/fido2/pin)"
 resident="$(get_field "${hdr}" clevis/fido2/resident 0)"
 device="$(get_field "${hdr}" clevis/fido2/device 0)"
 timeout="$(get_field "${hdr}" clevis/fido2/timeout 0)"
 aaguid="$(get_field "${hdr}" clevis/fido2/aaguid 0)"
+
+for v in "up=${up}" "uv=${uv}" "pin=${pin}" "resident=${resident:-false}"; do
+  case "${v#*=}" in
+  true|false) ;;
+  *)
+    echo "${0##*/}: Error: '${v%%=*}' in slot ${SLT} metadata is '${v#*=}', not a boolean -- corrupt or incompatible binding; nothing was changed." >&2
+    exit 1
+    ;;
+  esac
+done
 
 # Rebuild a plain CONFIG object (as a user would type it), reusing the same
 # cred_id so no re-enrollment happens -- only the salt/assertion is fresh.

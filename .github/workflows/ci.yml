@@ -51,6 +51,12 @@ jobs:
       - name: Run encrypt/decrypt logic tests
         run: bats tests/encrypt_decrypt.bats
 
+      # Exercises clevis-fido2-regen's header-reading/CONFIG-reconstruction
+      # logic against a real JWE (real jose, stubbed hardware), without
+      # needing LUKS/cryptsetup/root.
+      - name: Run clevis-fido2-regen offline logic tests
+        run: bats tests/regen_offline.bats
+
       # This one drives a real LUKS2 volume on a loop device with the real
       # clevis CLI (still only stubbing fido2-cred/fido2-assert/fido2-token),
       # so it needs root for losetup/cryptsetup. It's the only place in this

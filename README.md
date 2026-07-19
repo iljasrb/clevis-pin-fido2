@@ -12,7 +12,22 @@ You can check whether or not your token is suitable by executing `fido2-token -I
 
 ## Installation
 
-Copy `clevis-encrypt-fido2` and `clevis-encrypt-fido2` to the `$PATH` directory in which clevis is installed (or any local bin path if it should only work for the current user).
+Copy `clevis-encrypt-fido2` and `clevis-decrypt-fido2` to the `$PATH` directory in which clevis is installed (or any local bin path if it should only work for the current user). Optionally, also copy `clevis-fido2-regen` there (see [Rotating a binding](#rotating-a-binding) below) -- it is not needed at boot time, so it does not need to be reachable from the dracut initramfs.
+
+## Configuration options
+
+See [clevis-encrypt-fido2.1.adoc](clevis-encrypt-fido2.1.adoc) for the full list of
+`clevis encrypt fido2 CONFIG` options, including `type`, `cred_id`, `rp_id`, `up`,
+`uv`, `pin`, `resident` (create a discoverable/resident credential), `device`,
+`aaguid` (pick a specific connected token model instead of the first one found) and
+`timeout`.
+
+## Rotating a binding
+
+`clevis luks regen` does not work with this pin (it only understands a small set of
+built-in pins). Use `clevis-fido2-regen -d DEV` instead to rotate the hmac-salt of an
+existing LUKS2 binding while reusing the same enrolled credential -- see
+[clevis-fido2-regen.1.adoc](clevis-fido2-regen.1.adoc) for details.
 
 ## Dracut
 

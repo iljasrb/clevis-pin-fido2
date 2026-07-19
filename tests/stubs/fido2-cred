@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Stub fido2-cred for tests. Supports only the "-M [-r] -h device type"
+# invocation used by clevis-encrypt-fido2. Reads and discards the real
+# 4-line stdin protocol (client data hash, rp_id, user name, user id) and
+# emits a deterministic canned response in the real 8-line output shape
+# (client data hash, rp_id, fmt, authdata, cred_id, sig, cert, hmac key) --
+# only line 5 (cred_id) is actually consumed by the pin scripts.
+set -eu
+
+: "${STUB_LOG:=}"
+[ -n "${STUB_LOG}" ] && printf 'fido2-cred %s\n' "$*" >> "${STUB_LOG}"
+
+mode=''
+device=''
+type=''
+resident=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+  -M) mode='M'; shift ;;
+  -r) resident=1; shift ;;
+  -h) device="$2"; shift 2 ;;
+  -*) shift ;;
+  *) [ -z "${type}" ] && type="$1"; shift ;;
+  esac
+done
+
+if [ "${mode}" != 'M' ]; then
+  echo "stub fido2-cred: unsupported invocation: $*" >&2
+  exit 1
+fi
+
+# Discard the 4-line stdin protocol.
+for _ in 1 2 3 4; do IFS= read -r _ || true; done
+
+if [ -n "${STUB_FIDO2_CRED_FAIL:-}" ]; then
+  echo "${STUB_FIDO2_CRED_FAIL}" >&2
+  exit 1
+fi
+
+cred_id="$(printf 'stub-cred:%s:r%s:%s' "${type}" "${resident}" "${device}" | base64 -w0)"
+printf 'AAAA\n'
+printf 'AAAA\n'
+printf 'packed\n'
+printf 'AAAA\n'
+printf '%s\n' "${cred_id}"
+printf 'AAAA\n'
+printf 'AAAA\n'
+printf 'AAAA\n'

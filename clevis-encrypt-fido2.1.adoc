@@ -59,7 +59,7 @@ This command uses the following configuration properties:
   support the "hmac-secret" extension.
 
 * *rp_id* (string) :
-  The reyling party id of the credential (that will be created or is provided via
+  The relying party id of the credential (that will be created or is provided via
   the "cred_id" field).
   Default: 'fido2.clevis'.
 
@@ -73,6 +73,14 @@ This command uses the following configuration properties:
 
 * *pin* (boolean) :
   Whether or not to ask the authenticator to require the PIN and user verification.
+  Default: false.
+
+* *resident* (boolean) :
+  Whether or not to create a resident (discoverable) credential. Only used when a new
+  credential is generated, i.e. when "cred_id" is not set. A resident credential is
+  also listed by `fido2-token -L -r`, which can be useful for portability/backup
+  purposes. Decryption behaviour is unchanged either way: it always uses the stored
+  "cred_id", never on-device discovery.
   Default: false.
 
 * *device* (string) :
@@ -96,10 +104,17 @@ This command uses the following configuration properties:
 
   Default: ""
 
+* *aaguid* (string) :
+  A 32-character hex AAGUID. When set (and "device"/FIDO2_TOKEN is not), instead of
+  simply picking the first connected token, the first connected token whose AAGUID
+  (as reported by `fido2-token -I`) matches will be used, for both encryption and
+  every future decryption. Dashes/spaces are ignored.
+  Default: ""
+
 * *timeout* (string) :
   The number of seconds to wait for a device to become available for encryption AND every future decryption.
   To override the timeout temporarily use the TIMEOUT env variable.
-  Default: 50.
+  Default: 120.
 
 == EXAMPLES
 
@@ -137,4 +152,5 @@ echo "secret message" | clevis-encrypt-fido2 '{"device": "/dev/input/by-id/yubik
 
 == SEE ALSO
 
-link:clevis-decrypt.1.adoc[*clevis-decrypt*(1)]
+link:clevis-decrypt.1.adoc[*clevis-decrypt*(1)],
+link:clevis-fido2-regen.1.adoc[*clevis-fido2-regen*(1)]

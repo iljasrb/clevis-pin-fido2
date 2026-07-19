@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Stub fido2-token for tests. Supports "-L" (list) and "-I device" (info).
+#
+# Simulated tokens are configured via STUB_FIDO2_TOKENS: one "path aaguid"
+# pair per line. Defaults to a single token at /dev/null (a real character
+# device, so the pin scripts' `[[ -c "$path" ]]` check passes without
+# needing mknod/root) with a fixed AAGUID. Set STUB_FIDO2_NO_TOKEN=1 to
+# simulate no connected tokens at all.
+set -eu
+
+: "${STUB_LOG:=}"
+[ -n "${STUB_LOG}" ] && printf 'fido2-token %s\n' "$*" >> "${STUB_LOG}"
+
+: "${STUB_FIDO2_TOKENS:=/dev/null 2fc0579f811347eab116bb5a8db9202a}"
+
+case "${1:-}" in
+-L)
+  if [ -n "${STUB_FIDO2_NO_TOKEN:-}" ]; then
+    exit 0
+  fi
+  while IFS=' ' read -r path _; do
+    [ -z "${path}" ] && continue
+    printf '%s: vendor=0x0000, product=0x0000 (stub token)\n' "${path}"
+  done <<< "${STUB_FIDO2_TOKENS}"
+  ;;
+-I)
+  target="${2:-}"
+  aaguid=''
+  while IFS=' ' read -r path guid; do
+    [ "${path}" == "${target}" ] && aaguid="${guid}"
+  done <<< "${STUB_FIDO2_TOKENS}"
+  printf 'proto: 0x02\n'
+  printf 'options: rk, up, plat, clientPin, credentialMgmtPreview, uv\n'
+  [ -n "${aaguid}" ] && printf 'aaguid: %s\n' "${aaguid}"
+  ;;
+*)
+  echo "stub fido2-token: unsupported invocation: $*" >&2
+  exit 1
+  ;;
+esac

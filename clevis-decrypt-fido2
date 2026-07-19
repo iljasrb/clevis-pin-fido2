@@ -25,6 +25,25 @@ get_parm () {
   echo "${output}"
 }
 
+# find_token_by_aaguid() scans the "path: ..." lines from `fido2-token -L`
+# (passed as $1) and returns the path of the first one whose AAGUID (as
+# reported by `fido2-token -I`) matches the hex string in $2.
+find_token_by_aaguid () {
+  local tokens="$1"
+  local target="$2"
+  local line path candidate
+
+  while IFS= read -r line; do
+    [ -z "${line}" ] && continue
+    path="${line%%:*}"
+    candidate="$(fido2-token -I "${path}" 2>/dev/null | sed -n 's/^aaguid: *//p' | tr -cd '0-9a-fA-F' | tr 'A-F' 'a-f')"
+    if [ -n "${candidate}" ] && [ "${candidate}" == "${target}" ]; then
+      echo -n "${path}"
+      return 0
+    fi
+  done <<< "${tokens}"
+  return 1
+}
 
 read -r -d . hdr64
 if ! hdr="$(jose fmt --quote="$hdr64" --string --b64load --object --output=-)" ; then
@@ -45,10 +64,21 @@ up="$(get_parm /clevis/fido2/up 1)"
 pin="$(get_parm /clevis/fido2/pin 1)"
 timeout="$(get_parm /clevis/fido2/timeout 0)"
 device="$(get_parm /clevis/fido2/device 0)"
+aaguid="$(get_parm /clevis/fido2/aaguid 0)"
+
+if [[ -n "${timeout}" && ! "${timeout}" =~ ^[0-9]+$ ]]; then
+  echo "${0##*/}: Error: JWE 'timeout' header parameter is corrupt (not a non-negative integer): '${timeout}'." >&2
+  exit 1
+fi
+
+if [ -n "${aaguid}" ]; then
+  aaguid="$(echo -n "${aaguid}" | tr -cd '0-9a-fA-F' | tr 'A-F' 'a-f')"
+fi
 
 fido2_token="${FIDO2_TOKEN:-$device}"
 
 show_msg=1
+show_msg_aaguid=1
 user_timeout="${TIMEOUT:-$timeout}"
 timeout1="${user_timeout:-$DEFAULT_TIMEOUT}"
 while [[ ! -c "${fido2_token}" ]]; do
@@ -59,10 +89,18 @@ while [[ ! -c "${fido2_token}" ]]; do
       echo "${0##*/}: Please insert your FIDO2 token" >&2
       show_msg=0
     fi
-    fido2_token="$(echo "${fido2_tokens}" | head -n1 | cut -d':' -f1)"
-    num_tokens="$(echo "${fido2_tokens}" | wc -l)"
-    if ((num_tokens > 1)); then
-      echo "${0##*/}: Warning: There are multiple tokens. Will use the first one (${fido2_token})." >&2
+    if [ -n "${aaguid}" ]; then
+      fido2_token="$(find_token_by_aaguid "${fido2_tokens}" "${aaguid}")" || fido2_token=''
+      if [[ -z "${fido2_token}" && -n "${fido2_tokens}" && show_msg_aaguid -eq 1 ]]; then
+        echo "${0##*/}: No connected token matches the configured aaguid; waiting..." >&2
+        show_msg_aaguid=0
+      fi
+    else
+      fido2_token="$(echo "${fido2_tokens}" | head -n1 | cut -d':' -f1)"
+      num_tokens="$(echo "${fido2_tokens}" | wc -l)"
+      if ((num_tokens > 1)); then
+        echo "${0##*/}: Warning: There are multiple tokens. Will use the first one (${fido2_token})." >&2
+      fi
     fi
   else
     if [[ show_msg -eq 1 ]]; then
@@ -74,7 +112,11 @@ while [[ ! -c "${fido2_token}" ]]; do
   timeout1=$((timeout1-1))
   if [[ ${timeout1} -lt 1 ]]; then
     if [[ -z "${fido2_token}" ]]; then
-      echo "${0##*/}: Error: No FIDO2 token found within ${timeout} seconds." >&2
+      if [[ -n "${aaguid}" && -n "${fido2_tokens}" ]]; then
+        echo "${0##*/}: Error: No connected token matches the configured aaguid within ${timeout} seconds." >&2
+      else
+        echo "${0##*/}: Error: No FIDO2 token found within ${timeout} seconds." >&2
+      fi
     else
       echo "${0##*/}: Error: specified FIDO2 token ${fido2_token} not found within ${timeout} seconds." >&2
     fi
@@ -92,10 +134,18 @@ if [ "${uv}" == "false" ] && ! fido2-token -I "${fido2_token}" | grep -qE "optio
   f2a_uv=""
 fi
 
+errfile="$(mktemp)"
 #shellcheck disable=SC2086
 hmac="$(printf '%s\n%s\n%s\n%s\n' "${client_hash}" "${rp_id}" "${cred_id}" "${hmac_salt}" | \
-  fido2-assert -G -h ${f2a_uv} -t "up=${up}" -t "pin=${pin}" "${fido2_token}" | \
+  fido2-assert -G -h ${f2a_uv} -t "up=${up}" -t "pin=${pin}" "${fido2_token}" 2>"${errfile}" | \
   head -n5 | tail -n1 | base64 -d | jose b64 enc -I -)"
+hmac_err="$(cat "${errfile}")"
+rm -f "${errfile}"
+
+if [ -z "${hmac}" ]; then
+  echo "${0##*/}: Error: could not generate key.${hmac_err:+ ${hmac_err}}" >&2
+  exit 1
+fi
 
 # use the secret in a key wrapping key
 jwk='{"alg":"A256GCM", "kty":"oct"}'

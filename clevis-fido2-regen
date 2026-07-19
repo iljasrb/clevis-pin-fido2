@@ -1,0 +1,257 @@
+#!/bin/bash
+#
+# clevis-fido2-regen: rotates the hmac-salt (and, implicitly, the derived
+# wrapping key) of an existing clevis+fido2 LUKS2 binding, reusing the same
+# enrolled FIDO2 credential. This does NOT rely on `clevis luks regen`, which
+# only understands a hardcoded set of built-in pins and mishandles unknown
+# pins such as "fido2". Instead it drives clevis's public CLI directly
+# (`clevis luks bind`/`clevis luks unbind`/`clevis decrypt`) plus `cryptsetup`
+# and `jose` to read the existing binding's metadata. It never edits the LUKS
+# header/tokens itself and never sources clevis's internal implementation
+# scripts.
+#
+# Safety model: a new slot is added (bound with a fresh salt/credential
+# assertion, same cred_id) and independently verified to actually unlock the
+# device *before* the old slot is ever removed. A LUKS header backup is also
+# taken up front. LUKS2 only.
+
+set -eu
+
+SUMMARY="Rotates the hmac-salt of an existing clevis+fido2 LUKS2 binding"
+
+usage () {
+  exec >&2
+  echo
+  echo "Usage: clevis-fido2-regen -d DEV [-s SLT] [-y]"
+  echo
+  echo "${SUMMARY}."
+  echo
+  echo "  -d DEV   The LUKS2 device containing the fido2 binding to rotate"
+  echo "  -s SLT   The slot to rotate (auto-detected if there is exactly one"
+  echo "           fido2 binding on the device)"
+  echo "  -y       Skip confirmation prompts"
+  echo "  -h       Show this help"
+  echo
+  exit "${1}"
+}
+
+[ $# -eq 1 ] && [ "$1" == "--summary" ] && { echo "${SUMMARY}"; exit 0; }
+
+DEV=''
+SLT=''
+ASSUME_YES=0
+
+while getopts ':d:s:yh' o; do
+  case "${o}" in
+  d) DEV="${OPTARG}" ;;
+  s) SLT="${OPTARG}" ;;
+  y) ASSUME_YES=1 ;;
+  h) usage 0 ;;
+  *) usage 1 ;;
+  esac
+done
+
+[ -z "${DEV}" ] && { echo "${0##*/}: Error: Did not specify a device (-d)." >&2; usage 1; }
+
+if [ -n "${SLT}" ] && [[ ! "${SLT}" =~ ^[0-9]+$ ]]; then
+  echo "${0##*/}: Error: '-s' must be a non-negative integer slot number." >&2
+  exit 1
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "${0##*/}: Error: this needs to run as root (it edits the LUKS header)." >&2
+  exit 1
+fi
+
+if ! cryptsetup isLuks --type luks2 "${DEV}" 2>/dev/null; then
+  echo "${0##*/}: Error: '${DEV}' is not a LUKS2 device (LUKS1 is not supported by this tool)." >&2
+  exit 1
+fi
+
+# used_luks2_slots() lists the in-use keyslot numbers of $1, one per line.
+used_luks2_slots () {
+  cryptsetup luksDump "${1}" | sed -rn 's|^\s+([0-9]+): luks2$|\1|p'
+}
+
+# read_slot_jwe() prints the compact JWE bound to keyslot $2 of device $1, or
+# fails if that slot has no clevis token. Mirrors clevis's own (internal,
+# unversioned) clevis_luks_read_slot() LUKS2 branch using only public
+# cryptsetup/jose commands.
+read_slot_jwe () {
+  local dev="${1}" slot="${2}" token_id token
+  token_id="$(cryptsetup luksDump "${dev}" \
+    | grep -E -B1 "^\s+Keyslot:\s+${slot}$" \
+    | sed -n 1p | sed -rn 's|^\s+([0-9]+): clevis|\1|p')"
+  [ -z "${token_id}" ] && return 1
+  token="$(cryptsetup token export --token-id "${token_id}" "${dev}")" || return 1
+  jose fmt -j- -Og jwe -o- <<< "${token}" | jose jwe fmt -i- -c
+}
+
+# decode_header() base64url-decodes the protected header of compact JWE $1.
+decode_header () {
+  local hdr64="${1%%.*}"
+  jose fmt --quote="${hdr64}" --string --b64load --object --output=-
+}
+
+# get_field() reads slash-separated path $2 from decoded header JSON $1.
+# $3 = 1 if the field is mandatory (fails loudly if missing).
+get_field () {
+  local hdr="${1}" elements mandatory output
+  elements="${2//\// --get }"
+  mandatory="${3}"
+  #shellcheck disable=SC2086
+  if ! output="$(jose fmt --json="${hdr}" ${elements} --unquote=-)" && [ "${mandatory}" -eq 1 ]; then
+    return 1
+  fi
+  echo "${output}"
+}
+
+# find_fido2_slots() lists (space-separated) the keyslots of $1 that are
+# bound with a clevis+fido2 token.
+find_fido2_slots () {
+  local dev="${1}" slot jwe hdr pin_name matches=''
+  for slot in $(used_luks2_slots "${dev}"); do
+    if jwe="$(read_slot_jwe "${dev}" "${slot}" 2>/dev/null)" && [ -n "${jwe}" ] \
+        && hdr="$(decode_header "${jwe}" 2>/dev/null)" \
+        && pin_name="$(get_field "${hdr}" clevis/pin 1 2>/dev/null)" \
+        && [ "${pin_name}" == "fido2" ]; then
+      matches="${matches}${matches:+ }${slot}"
+    fi
+  done
+  echo "${matches}"
+}
+
+if [ -z "${SLT}" ]; then
+  candidates="$(find_fido2_slots "${DEV}")"
+  case "$(echo "${candidates}" | wc -w)" in
+  0)
+    echo "${0##*/}: Error: no clevis+fido2 binding found on ${DEV}." >&2
+    exit 1
+    ;;
+  1)
+    SLT="${candidates}"
+    ;;
+  *)
+    echo "${0##*/}: Error: multiple clevis+fido2 bindings found on ${DEV} (slots: ${candidates}); specify which one with -s." >&2
+    exit 1
+    ;;
+  esac
+fi
+
+jwe="$(read_slot_jwe "${DEV}" "${SLT}")" || {
+  echo "${0##*/}: Error: slot ${SLT} on ${DEV} has no clevis token." >&2
+  exit 1
+}
+hdr="$(decode_header "${jwe}")" || {
+  echo "${0##*/}: Error: could not decode the JWE header for slot ${SLT}." >&2
+  exit 1
+}
+pin_name="$(get_field "${hdr}" clevis/pin 1)" || {
+  echo "${0##*/}: Error: slot ${SLT} has no clevis pin metadata." >&2
+  exit 1
+}
+if [ "${pin_name}" != "fido2" ]; then
+  echo "${0##*/}: Error: slot ${SLT} on ${DEV} is bound with pin '${pin_name}', not 'fido2'." >&2
+  exit 1
+fi
+
+type="$(get_field "${hdr}" clevis/fido2/type 1)"
+rp_id="$(get_field "${hdr}" clevis/fido2/rp_id 1)"
+cred_id="$(get_field "${hdr}" clevis/fido2/cred_id 1)"
+uv="$(get_field "${hdr}" clevis/fido2/uv 1)"
+up="$(get_field "${hdr}" clevis/fido2/up 1)"
+pin="$(get_field "${hdr}" clevis/fido2/pin 1)"
+resident="$(get_field "${hdr}" clevis/fido2/resident 0)"
+device="$(get_field "${hdr}" clevis/fido2/device 0)"
+timeout="$(get_field "${hdr}" clevis/fido2/timeout 0)"
+aaguid="$(get_field "${hdr}" clevis/fido2/aaguid 0)"
+
+# Rebuild a plain CONFIG object (as a user would type it), reusing the same
+# cred_id so no re-enrollment happens -- only the salt/assertion is fresh.
+new_cfg='{}'
+new_cfg="$(jose fmt -j "${new_cfg}" -q "${type}" -s type -Uo-)"
+new_cfg="$(jose fmt -j "${new_cfg}" -q "${rp_id}" -s rp_id -Uo-)"
+new_cfg="$(jose fmt -j "${new_cfg}" -q "${cred_id}" -s cred_id -Uo-)"
+new_cfg="$(jose fmt -j "${new_cfg}" -j "${up}" -s up -Uo-)"
+new_cfg="$(jose fmt -j "${new_cfg}" -j "${uv}" -s uv -Uo-)"
+new_cfg="$(jose fmt -j "${new_cfg}" -j "${pin}" -s pin -Uo-)"
+[ -n "${resident}" ] && new_cfg="$(jose fmt -j "${new_cfg}" -j "${resident}" -s resident -Uo-)"
+[ -n "${device}" ] && new_cfg="$(jose fmt -j "${new_cfg}" -q "${device}" -s device -Uo-)"
+[ -n "${timeout}" ] && new_cfg="$(jose fmt -j "${new_cfg}" -q "${timeout}" -s timeout -Uo-)"
+[ -n "${aaguid}" ] && new_cfg="$(jose fmt -j "${new_cfg}" -q "${aaguid}" -s aaguid -Uo-)"
+
+echo "Regenerating clevis+fido2 binding on ${DEV}, slot ${SLT}:" >&2
+echo "  rp_id=${rp_id} cred_id=${cred_id} type=${type}" >&2
+echo "This will add a new slot bound with a fresh hmac-salt (same credential)," >&2
+echo "verify it works, then remove slot ${SLT}. It will touch your token up to 3 times." >&2
+
+if [ "${ASSUME_YES}" -ne 1 ]; then
+  read -r -p "Do you want to proceed? [yN] " ans < /dev/tty
+  case "${ans}" in
+  y|Y) ;;
+  *) exit 0 ;;
+  esac
+fi
+
+backup_file="$(pwd)/clevis-fido2-regen-$(basename "${DEV}")-$(date +%Y%m%d%H%M%S).header-backup"
+if ! cryptsetup luksHeaderBackup "${DEV}" --batch-mode --header-backup-file "${backup_file}"; then
+  echo "${0##*/}: Error: could not back up the LUKS header; aborting before making any changes." >&2
+  exit 1
+fi
+echo "LUKS header backed up to ${backup_file} -- keep this until you've confirmed the device unlocks normally." >&2
+
+before_slots="$(used_luks2_slots "${DEV}")"
+
+if ! clevis luks bind -y -d "${DEV}" fido2 "${new_cfg}" < /dev/null; then
+  echo "${0##*/}: Error: 'clevis luks bind' failed; slot ${SLT} was left untouched." >&2
+  exit 1
+fi
+
+after_slots="$(used_luks2_slots "${DEV}")"
+new_slot=''
+for s in ${after_slots}; do
+  case " ${before_slots} " in
+  *" ${s} "*) ;;
+  *) new_slot="${s}" ;;
+  esac
+done
+
+if [ -z "${new_slot}" ]; then
+  echo "${0##*/}: Error: could not determine the newly added slot number; slot ${SLT} was left untouched. Inspect '${DEV}' manually (cryptsetup luksDump)." >&2
+  exit 1
+fi
+
+echo "New slot ${new_slot} added. Verifying it actually unlocks the device (one more touch/PIN)..." >&2
+
+new_jwe="$(read_slot_jwe "${DEV}" "${new_slot}")" || {
+  echo "${0##*/}: Error: could not read back the new slot's metadata; NOT removing slot ${SLT}. Inspect/clean up slot ${new_slot} manually." >&2
+  exit 1
+}
+new_hdr="$(decode_header "${new_jwe}")" || {
+  echo "${0##*/}: Error: could not decode the new slot's JWE header; NOT removing slot ${SLT}. Inspect/clean up slot ${new_slot} manually." >&2
+  exit 1
+}
+new_pin_name="$(get_field "${new_hdr}" clevis/pin 1)" || new_pin_name=''
+if [ "${new_pin_name}" != "fido2" ]; then
+  echo "${0##*/}: Error: new slot ${new_slot} is unexpectedly not a fido2 binding; NOT removing slot ${SLT}. Inspect/clean up slot ${new_slot} manually." >&2
+  exit 1
+fi
+
+new_pt="$(printf '%s' "${new_jwe}" | clevis decrypt)" || {
+  echo "${0##*/}: Error: could not decrypt the new binding; NOT removing slot ${SLT}. Inspect/clean up slot ${new_slot} manually." >&2
+  exit 1
+}
+if [ -z "${new_pt}" ] || ! printf '%s' "${new_pt}" | cryptsetup open --test-passphrase --key-slot "${new_slot}" "${DEV}"; then
+  echo "${0##*/}: Error: the new slot did not pass the unlock test; NOT removing slot ${SLT}. Inspect/clean up slot ${new_slot} manually (e.g. 'clevis luks unbind -d ${DEV} -s ${new_slot}')." >&2
+  exit 1
+fi
+
+echo "New slot ${new_slot} verified working. Removing old slot ${SLT}..." >&2
+
+if [ "${ASSUME_YES}" -eq 1 ]; then
+  clevis luks unbind -d "${DEV}" -s "${SLT}" -f
+else
+  clevis luks unbind -d "${DEV}" -s "${SLT}"
+fi
+
+echo "Done: ${DEV} slot ${SLT} rotated to slot ${new_slot}. Header backup kept at ${backup_file}." >&2

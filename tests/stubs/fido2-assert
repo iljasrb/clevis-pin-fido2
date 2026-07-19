@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Stub fido2-assert for tests. Supports only the "-G -h [-t uv=X] -t up=X
+# -t pin=X device" invocation used by the pin scripts. Reads and discards
+# the real 4-line stdin protocol (client hash, rp_id, cred_id, hmac_salt)
+# and emits a deterministic canned 5-line response, where line 5 is a
+# fixed, valid base64-encoded 32-byte "hmac secret" -- enough to exercise
+# the real jose JWE encrypt/decrypt round trip, but NOT a cryptographic
+# correctness test of the actual hmac-secret derivation (that needs real
+# hardware or a QEMU+canokey-qemu virtual authenticator).
+set -eu
+
+: "${STUB_LOG:=}"
+[ -n "${STUB_LOG}" ] && printf 'fido2-assert %s\n' "$*" >> "${STUB_LOG}"
+
+mode=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+  -G) mode='G'; shift ;;
+  -t) shift 2 ;;
+  -h|-u|-v|-p|-b|-d) shift ;;
+  -*) shift ;;
+  *) shift ;;
+  esac
+done
+
+if [ "${mode}" != 'G' ]; then
+  echo "stub fido2-assert: unsupported invocation: $*" >&2
+  exit 1
+fi
+
+# Discard the 4-line stdin protocol.
+for _ in 1 2 3 4; do IFS= read -r _ || true; done
+
+if [ -n "${STUB_FIDO2_ASSERT_FAIL:-}" ]; then
+  echo "${STUB_FIDO2_ASSERT_FAIL}" >&2
+  exit 1
+fi
+
+printf 'AAAA\n'
+printf 'AAAA\n'
+printf 'AAAA\n'
+printf 'AAAA\n'
+printf '%s\n' "$(head -c32 /dev/zero | base64 -w0)"

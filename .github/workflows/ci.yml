@@ -57,11 +57,9 @@ jobs:
       - name: Run clevis-fido2-regen offline logic tests
         run: bats tests/regen_offline.bats
 
-      # This one drives a real LUKS2 volume on a loop device with the real
-      # clevis CLI (still only stubbing fido2-cred/fido2-assert/fido2-token),
-      # so it needs root for losetup/cryptsetup. It's the only place in this
-      # repo's test suite that can validate clevis-fido2-regen's LUKS-slot
-      # orchestration; it's skipped (not failed) outside of an environment
-      # like this one.
+      # This one drives a real LUKS2 volume (an image file -- no root or
+      # loop devices needed) with the real clevis CLI, still only stubbing
+      # fido2-cred/fido2-assert/fido2-token. It validates
+      # clevis-fido2-regen's full LUKS-slot orchestration end to end.
       - name: Run clevis-fido2-regen LUKS2 integration test
-        run: sudo -E bats tests/regen.bats
+        run: bats tests/regen.bats

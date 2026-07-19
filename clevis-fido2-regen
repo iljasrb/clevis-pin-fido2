@@ -58,7 +58,9 @@ if [ -n "${SLT}" ] && [[ ! "${SLT}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-if [ "$(id -u)" -ne 0 ]; then
+# Editing the LUKS header of a real block device needs root; a regular
+# file (e.g. a disk image or a test fixture) does not.
+if [ -b "${DEV}" ] && [ "$(id -u)" -ne 0 ]; then
   echo "${0##*/}: Error: this needs to run as root (it edits the LUKS header)." >&2
   exit 1
 fi
@@ -203,7 +205,19 @@ echo "LUKS header backed up to ${backup_file} -- keep this until you've confirme
 
 before_slots="$(used_luks2_slots "${DEV}")"
 
-if ! clevis luks bind -y -d "${DEV}" fido2 "${new_cfg}" < /dev/null; then
+# Recover the LUKS key from the existing binding ourselves and hand it to
+# `clevis luks bind -k -`. Bind's no--k interactive path cannot be used
+# non-interactively: clevis-luks-bind runs under `bash -e` and its
+# `read -p "Enter existing LUKS password:"` dies on EOF (only the -k -
+# path tolerates EOF with `||:`), and its internal recovery fallback is
+# only reached from the interactive prompt.
+echo "Recovering the LUKS key from the existing binding (touch/PIN 1 of up to 3)..." >&2
+if ! old_pt="$(printf '%s' "${jwe}" | clevis decrypt)" || [ -z "${old_pt}" ]; then
+  echo "${0##*/}: Error: could not decrypt the existing binding in slot ${SLT}; nothing was changed." >&2
+  exit 1
+fi
+
+if ! printf '%s' "${old_pt}" | clevis luks bind -y -k - -d "${DEV}" fido2 "${new_cfg}"; then
   echo "${0##*/}: Error: 'clevis luks bind' failed; slot ${SLT} was left untouched." >&2
   exit 1
 fi

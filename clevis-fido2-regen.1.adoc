@@ -71,12 +71,6 @@ unverified) slot is reported so it can be inspected or removed manually.
     New slot 2 verified working. Removing old slot 1...
     Done: /dev/sda2 slot 1 rotated to slot 2. Header backup kept at /root/clevis-fido2-regen-sda2-20260719120000.header-backup.
 
-== CAVEATS
-
-This tool has not been exercised against real FIDO2 hardware. Dry-run it on a
-throwaway LUKS2 volume before relying on it for anything real, and keep the header
-backup it prints until you have confirmed the device unlocks normally on next boot.
-
 == SEE ALSO
 
 link:clevis-encrypt-fido2.1.adoc[*clevis-encrypt-fido2*(1)],

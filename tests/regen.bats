@@ -35,7 +35,12 @@ teardown () {
 }
 
 @test "clevis-fido2-regen rotates a real LUKS2+fido2 binding" {
-  printf '%s' "${PASS}" | clevis luks bind -y -d "${LOOPDEV}" fido2 '{"timeout":3}' -k -
+  # -k (and every other clevis-luks-bind flag) must precede the positional
+  # PIN/CONFIG arguments: clevis-luks-bind uses bash's `getopts`, which stops
+  # scanning for flags at the first non-flag argument, so a trailing "-k -"
+  # is silently dropped and clevis falls through to its own interactive
+  # password prompt instead of reading the key from stdin.
+  printf '%s' "${PASS}" | clevis luks bind -y -k - -d "${LOOPDEV}" fido2 '{"timeout":3}'
 
   run clevis luks list -d "${LOOPDEV}"
   [ "$status" -eq 0 ]

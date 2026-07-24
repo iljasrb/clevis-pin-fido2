@@ -114,6 +114,21 @@ setup () {
   [[ "$output" == *"'aaguid' must be a 32-character hex string"* ]]
 }
 
+@test "device path starting with /dev/hid is rejected" {
+  run bash -c "printf x | clevis-encrypt-fido2 '{\"device\":\"/dev/hidraw0\",\"timeout\":1}'"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FIDO2_TOKEN env variable must be used instead"* ]]
+}
+
+@test "device path merely containing /dev/hid elsewhere (not as a prefix) is not rejected" {
+  # Must fail only because the path doesn't exist as a device (times out
+  # waiting for it), not because of the /dev/hid-prefix check.
+  run bash -c "printf x | clevis-encrypt-fido2 '{\"device\":\"/mnt/backup/dev/hidraw0\",\"timeout\":1}'"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"FIDO2_TOKEN env variable must be used instead"* ]]
+  [[ "$output" == *"not found within 1 seconds"* ]]
+}
+
 @test "non-string cred_id is rejected, not silently replaced by a new credential" {
   run bash -c "printf x | clevis-encrypt-fido2 '{\"cred_id\": 12345, \"timeout\":2}'"
   [ "$status" -eq 1 ]

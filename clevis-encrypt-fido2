@@ -248,7 +248,7 @@ if [ -n "${aaguid}" ]; then
   fi
 fi
 
-if [[ "${device}" =~ /dev/hid ]]; then
+if [[ "${device}" =~ ^/dev/hid ]]; then
   echo "${0##*/}: Error: If the device path is ephemeral and starts with '/dev/hid', the FIDO2_TOKEN env variable must be used instead." >&2
   exit 1
 fi
